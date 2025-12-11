@@ -5,6 +5,9 @@ param userPrincipalId string
 @description('Primary location for all resources.')
 param location string = resourceGroup().location
 
+@description('SKU for the App Service Plan (e.g., F1, B1, S1, P1V2)')
+param webAppSku string = 'P1v3'
+
 var cosmosDbName = '${uniqueString(resourceGroup().id)}-cosmosdb'
 var cosmosDbDatabaseName = 'zava'
 var storageAccountName = '${uniqueString(resourceGroup().id)}sa'
@@ -15,7 +18,6 @@ var webAppName = '${uniqueString(resourceGroup().id)}-app'
 var appServicePlanName = '${uniqueString(resourceGroup().id)}-cosu-asp'
 var logAnalyticsName = '${uniqueString(resourceGroup().id)}-cosu-la'
 var appInsightsName = '${uniqueString(resourceGroup().id)}-cosu-ai'
-var webAppSku = 'S1'
 var registryName = '${uniqueString(resourceGroup().id)}cosureg'
 var registrySku = 'Standard'
 
@@ -84,6 +86,7 @@ resource aiFoundry 'Microsoft.CognitiveServices/accounts@2025-04-01-preview' = {
     customSubDomainName: aiFoundryName
 
     disableLocalAuth: false
+    publicNetworkAccess: 'Enabled'
   }
 }
 
@@ -99,7 +102,9 @@ resource aiProject 'Microsoft.CognitiveServices/accounts/projects@2025-04-01-pre
   identity: {
     type: 'SystemAssigned'
   }
-  properties: {}
+  properties: {
+    publicNetworkAccess: 'Enabled'
+  }
 }
 
 @description('Creates an Azure AI Search service.')
@@ -152,56 +157,60 @@ resource containerRegistry 'Microsoft.ContainerRegistry/registries@2022-12-01' =
   }
 }
 
-@description('Creates an Azure App Service Plan.')
-resource appServicePlan 'Microsoft.Web/serverFarms@2022-09-01' = {
-  name: appServicePlanName
-  location: location
-  kind: 'linux'
-  properties: {
-    reserved: true
-  }
-  sku: {
-    name: webAppSku
-  }
-}
-
-@description('Creates an Azure App Service for Zava.')
-resource appServiceApp 'Microsoft.Web/sites@2022-09-01' = {
+@description('Creates an Azure Container Instance for Zava.')
+resource containerInstance 'Microsoft.ContainerInstance/containerGroups@2023-05-01' = {
   name: webAppName
   location: location
+  identity: {
+    type: 'SystemAssigned'
+  }
   properties: {
-    serverFarmId: appServicePlan.id
-    httpsOnly: true
-    clientAffinityEnabled: false
-    siteConfig: {
-      linuxFxVersion: 'DOCKER|${containerRegistry.name}.azurecr.io/${uniqueString(resourceGroup().id)}/techworkshopl300/zava'
-      http20Enabled: true
-      minTlsVersion: '1.2'
-      appCommandLine: ''
-      appSettings: [
-        {
-          name: 'WEBSITES_ENABLE_APP_SERVICE_STORAGE'
-          value: 'false'
+    containers: [
+      {
+        name: 'zava-app'
+        properties: {
+          image: 'mcr.microsoft.com/azuredocs/aci-helloworld:latest'
+          ports: [
+            {
+              port: 80
+              protocol: 'TCP'
+            }
+          ]
+          resources: {
+            requests: {
+              cpu: 1
+              memoryInGB: 2
+            }
+          }
+          environmentVariables: [
+            {
+              name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
+              value: appInsights.properties.InstrumentationKey
+            }
+          ]
         }
-        {
-          name: 'DOCKER_REGISTRY_SERVER_URL'
-          value: 'https://${containerRegistry.name}.azurecr.io'
-        }
-        {
-          name: 'DOCKER_REGISTRY_SERVER_USERNAME'
-          value: containerRegistry.name
-        }
-        {
-          name: 'DOCKER_REGISTRY_SERVER_PASSWORD'
-          value: containerRegistry.listCredentials().passwords[0].value
-        }
-        {
-          name: 'APPINSIGHTS_INSTRUMENTATIONKEY'
-          value: appInsights.properties.InstrumentationKey
-        }
-        ]
       }
+    ]
+    osType: 'Linux'
+    restartPolicy: 'Always'
+    ipAddress: {
+      type: 'Public'
+      ports: [
+        {
+          port: 80
+          protocol: 'TCP'
+        }
+      ]
+      dnsNameLabel: webAppName
     }
+    imageRegistryCredentials: [
+      {
+        server: '${containerRegistry.name}.azurecr.io'
+        username: containerRegistry.name
+        password: containerRegistry.listCredentials().passwords[0].value
+      }
+    ]
+  }
 }
 
 // Cosmos DB built-in data plane role IDs
@@ -298,6 +307,6 @@ output cosmosDbEndpoint string = cosmosDbAccount.properties.documentEndpoint
 output storageAccountName string = storageAccount.name
 output searchServiceName string = searchService.name
 output container_registry_name string = containerRegistry.name
-output application_name string = appServiceApp.name
-output application_url string = appServiceApp.properties.hostNames[0]
+output application_name string = containerInstance.name
+output application_url string = containerInstance.properties.ipAddress.fqdn
 
